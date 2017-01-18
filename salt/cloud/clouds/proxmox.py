@@ -176,7 +176,6 @@ def query(conn_type, option, post_data=None):
                                 cookies=ticket)
 
     response.raise_for_status()
-
     try:
         returned_data = response.json()
         if 'data' not in returned_data:
@@ -561,18 +560,6 @@ def create(vm_):
     host = data['node']       # host which we have received
     nodeType = data['technology']  # VM tech (Qemu / OpenVZ)
 
-    # Determine which IP to use in order of preference:
-    if 'ip_address' in vm_:
-        ip_address = str(vm_['ip_address'])
-    elif 'public_ips' in data:
-        ip_address = str(data['public_ips'][0])  # first IP
-    elif 'private_ips' in data:
-        ip_address = str(data['private_ips'][0])  # first IP
-    else:
-        raise SaltCloudExecutionFailure  # err.. not a good idea i reckon
-
-    log.debug('Using IP address {0}'.format(ip_address))
-
     # wait until the vm has been created so we can start it
     if not wait_for_created(data['upid'], timeout=300):
         return {'Error': 'Unable to create {0}, command timed out'.format(name)}
@@ -586,6 +573,21 @@ def create(vm_):
     log.debug('Waiting for state "running" for vm {0} on {1}'.format(vmid, host))
     if not wait_for_state(vmid, 'running'):
         return {'Error': 'Unable to start {0}, command timed out'.format(name)}
+
+    # Determine which IP to use in order of preference
+    # We want hardcoded, but DHCP is ok if the QEMU agent is available
+    if 'ip_address' in vm_:
+        ip_address = str(vm_['ip_address'])
+    elif 'public_ips' in data:
+        ip_address = str(data['public_ips'][0])  # first IP
+    elif 'private_ips' in data:
+        ip_address = str(data['private_ips'][0])  # first IP
+    elif 'use_dhcp' in vm_ and 'agent' in vm_:
+        ip_address = wait_for_ip(host, vmid)  # Gets IP from QEMU Agent
+    else:
+        raise SaltCloudExecutionFailure  # err.. not a good idea i reckon // probably be changed to a better error
+
+    log.debug('Using IP address {0}'.format(ip_address))
 
     ssh_username = config.get_cloud_config_value(
         'ssh_username', vm_, __opts__, default='root'
@@ -801,6 +803,45 @@ def wait_for_state(vmid, state, timeout=300):
         node = get_vm_status(vmid=vmid)
         log.debug('State for {0} is: "{1}" instead of "{2}"'.format(
                   node['name'], node['status'], state))
+
+
+def wait_for_ip(host, vmid, timeout=300):
+    '''
+    Wait until Proxmox API can pull an ip address from QEMU Agent
+
+    Requires:
+    agent: 1
+    use_dhcp: 1
+
+    API Call: POST /api2/json/nodes/{node}/qemu/{vmid}/agent
+    POST: command: network-get-interfaces
+    '''
+
+    start_time = time.time()
+    node = get_vm_status(vmid=vmid)
+
+    if not node:
+        log.error('wait_for_ip: No VM retrieved based on given criteria')
+        raise SaltCloudExecutionFailure
+
+    post_params = {}
+    post_params['command'] = 'network-get-interfaces'
+
+    while True:
+        # We want to gracefully handle API errors so ths function doesn't fail
+        if time.time() - start_time > timeout:
+            log.error("Timeout Reached")
+            raise SaltCloudExecutionFailure
+        try:
+            ifaces = query('post', 'nodes/{0}/qemu/{1}/agent'.format(host, vmid), post_params)
+            iface_list = [i for i in ifaces['result'] if i['name'] != 'lo']
+            for iface in iface_list:
+                iface = [i['ip-address'] for i in iface['ip-addresses'] if i['ip-address-type'] != 'ipv6']
+                return iface[0]
+        except requests.HTTPError:
+            log.debug("Recieved Error from API Call, QEMU Agent probably not ready")
+            log.debug("Sleeping for 15 seconds.")  # Takes a moment for the Network Interface to come up
+            time.sleep(15)
 
 
 def destroy(name, call=None):
