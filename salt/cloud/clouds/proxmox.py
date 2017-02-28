@@ -582,7 +582,7 @@ def create(vm_):
         ip_address = str(data['public_ips'][0])  # first IP
     elif 'private_ips' in data:
         ip_address = str(data['private_ips'][0])  # first IP
-    elif 'use_dhcp' in vm_ and 'agent' in vm_:
+    elif 'use_dhcp' in vm_ and 'agent' in vm_ and vm_['use_dhcp'] == 1 and vm_['agent'] == 1:
         ip_address = wait_for_ip(host, vmid)  # Gets IP from QEMU Agent
     else:
         raise SaltCloudExecutionFailure  # err.. not a good idea i reckon // probably be changed to a better error
